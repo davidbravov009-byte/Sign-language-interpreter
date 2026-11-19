@@ -1,76 +1,78 @@
 import cv2
-from cvzone.HandTrackingModule import HandDetector
 import numpy as np
 import math
-import time
 import os
+import string
+from cvzone.HandTrackingModule import HandDetector
 
-# Initialize video capture
+# Controles:
+#   Tecla A-Z  -> elegir la letra a grabar
+#   ESPACIO    -> guardar imagen
+#   ESC        -> salir
+
 cap = cv2.VideoCapture(0)
+detector = HandDetector(maxHands=1)
 
-# Initialize hand detector
-detector = HandDetector(maxHands=2)
-
-# Image processing parameters
 imgSize = 300
 offset = 20
+base_folder = 'Data'
 
-# Directory to save images
-folder = 'Data/ yes'
-if not os.path.exists(folder):
-    os.makedirs(folder)
+# Crear una carpeta por letra y contar imágenes existentes
+counts = {}
+for letter in string.ascii_uppercase:
+    path = os.path.join(base_folder, letter)
+    os.makedirs(path, exist_ok=True)
+    counts[letter] = len(os.listdir(path))
 
-counter = 0  # Counter for saved images
+current = 'A'
 
 while True:
-    success, img = cap.read()  # Read frame from the webcam
-    hands, img = detector.findHands(img)  # Detect hands in the frame
-
-    if hands:
-        hand = hands[0]
-        x, y, w, h = hand['bbox']
-
-        # Create white image for processed output
-        imgWhite = np.ones((imgSize, imgSize, 3), np.uint8) * 255
-        imgCrop = img[y - offset:y + h + offset, x - offset:x + w + offset]
-        imgCropShape = imgCrop.shape
-
-        aspectRatio = h / w
-
-        # Resize and fit the cropped image into the white canvas
-        if aspectRatio > 1:  # If height > width
-            k = imgSize / h
-            wCal = math.ceil(k * w)
-            imgResize = cv2.resize(imgCrop, (wCal, imgSize))
-            wGap = math.ceil((imgSize - wCal) / 2)
-            imgWhite[:, wGap:wGap + wCal] = imgResize
-
-        else:  # If width >= height
-            k = imgSize / w
-            hCal = math.ceil(k * h)
-            imgResize = cv2.resize(imgCrop, (imgSize, hCal))
-            hGap = math.ceil((imgSize - hCal) / 2)
-            imgWhite[hGap:hGap + hCal, :] = imgResize
-
-        # Display processed and cropped images
-        cv2.imshow("ImageWhite", imgWhite)
-        cv2.imshow("ImageCrop", imgCrop)
-
-    # Display the webcam feed
-    cv2.imshow('Webcam', img)
-
-    # Keyboard controls
-    key = cv2.waitKey(1)
-    if key == ord('s'):  # Save the processed image when 's' is pressed
-        counter += 1
-        filename = f'{folder}/Image_{time.strftime("%Y%m%d_%H%M%S")}.jpg'
-        cv2.imwrite(filename, imgWhite)
-        print(f"Saved: {filename} (Total: {counter})")
-
-    elif key == ord('q'):  # Quit when 'q' is pressed
-        print("Exiting...")
+    success, img = cap.read()
+    if not success:
         break
 
-# Release resources
+    imgClean = img.copy()  # copia sin dibujos, para guardar
+    hands, img = detector.findHands(img)
+    imgWhite = None
+
+    if hands:
+        x, y, w, h = hands[0]['bbox']
+        imgWhite = np.ones((imgSize, imgSize, 3), np.uint8) * 255
+        imgCrop = imgClean[max(0, y - offset):y + h + offset,
+                           max(0, x - offset):x + w + offset]
+
+        if imgCrop.size != 0:
+            aspectRatio = h / w
+            if aspectRatio > 1:
+                k = imgSize / h
+                wCal = math.ceil(k * w)
+                imgResize = cv2.resize(imgCrop, (wCal, imgSize))
+                wGap = math.ceil((imgSize - wCal) / 2)
+                imgWhite[:, wGap:wCal + wGap] = imgResize
+            else:
+                k = imgSize / w
+                hCal = math.ceil(k * h)
+                imgResize = cv2.resize(imgCrop, (imgSize, hCal))
+                hGap = math.ceil((imgSize - hCal) / 2)
+                imgWhite[hGap:hCal + hGap, :] = imgResize
+
+            cv2.imshow('ImageWhite', imgWhite)
+        else:
+            imgWhite = None
+
+    cv2.putText(img, f'Letra: {current}  Imagenes: {counts[current]}',
+                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.imshow('Image', img)
+
+    key = cv2.waitKey(1) & 0xFF
+    if key == 27:
+        break
+    elif ord('a') <= key <= ord('z'):
+        current = chr(key).upper()
+    elif key == ord(' ') and imgWhite is not None:
+        counts[current] += 1
+        cv2.imwrite(f'{base_folder}/{current}/{current}_{counts[current]}.jpg', imgWhite)
+        print(f'Guardada {current}: {counts[current]}')
+
 cap.release()
 cv2.destroyAllWindows()

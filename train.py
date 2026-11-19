@@ -1,105 +1,68 @@
 import os
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.utils import class_weight
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.optimizers import Adam
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV2
 
-# ========== 1. Count Images Per Class ==========
-data_dir = 'Data/'
-print("Image Count Per Class:")
-for label in os.listdir(data_dir):
-    label_path = os.path.join(data_dir, label)
-    print(f"{label}: {len(os.listdir(label_path))} images")
+DATA_DIR = 'Data'
+MODEL_DIR = 'Model'
+IMG_SIZE = (224, 224)
+BATCH = 32
+EPOCHS = 15
 
-# ========== 2. Image Augmentation and Data Generator ==========
-img_size = (64, 64)
-batch_size = 32
+os.makedirs(MODEL_DIR, exist_ok=True)
 
-datagen = ImageDataGenerator(
-    rescale=1./255,
-    rotation_range=15,
-    width_shift_range=0.1,
-    height_shift_range=0.1,
-    zoom_range=0.1,
-    horizontal_flip=True,
-    validation_split=0.2
-)
+# Cargar imágenes desde Data/A, Data/B, ... (solo carpetas con imágenes)
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    DATA_DIR, validation_split=0.2, subset='training', seed=42,
+    image_size=IMG_SIZE, batch_size=BATCH, label_mode='categorical')
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    DATA_DIR, validation_split=0.2, subset='validation', seed=42,
+    image_size=IMG_SIZE, batch_size=BATCH, label_mode='categorical')
 
-train_generator = datagen.flow_from_directory(
-    data_dir,
-    target_size=img_size,
-    batch_size=batch_size,
-    class_mode='sparse',
-    subset='training'
-)
+class_names = train_ds.class_names
+print('Clases:', class_names)
 
-val_generator = datagen.flow_from_directory(
-    data_dir,
-    target_size=img_size,
-    batch_size=batch_size,
-    class_mode='sparse',
-    subset='validation'
-)
+# Guardar labels.txt (mismo formato de Teachable Machine: "0 A")
+with open(os.path.join(MODEL_DIR, 'labels.txt'), 'w') as f:
+    for i, name in enumerate(class_names):
+        f.write(f'{i} {name}\n')
 
-# ========== 3. Compute Class Weights ==========
-y_train = train_generator.classes
-class_weights = class_weight.compute_class_weight(
-    class_weight='balanced',
-    classes=np.unique(y_train),
-    y=y_train
-)
-class_weights_dict = dict(enumerate(class_weights))
-print("\nClass Weights:", class_weights_dict)
-
-# ========== 4. Model Architecture ==========
-model = Sequential([
-    Conv2D(32, (3, 3), activation='relu', input_shape=(64, 64, 3)),
-    MaxPooling2D(2, 2),
-    Conv2D(64, (3, 3), activation='relu'),
-    MaxPooling2D(2, 2),
-    Conv2D(128, (3, 3), activation='relu'),
-    MaxPooling2D(2, 2),
-    Flatten(),
-    Dense(128, activation='relu'),
-    Dropout(0.5),
-    Dense(train_generator.num_classes, activation='softmax')
+# Aumento de datos
+augment = tf.keras.Sequential([
+    layers.RandomRotation(0.08),
+    layers.RandomZoom(0.1),
+    layers.RandomTranslation(0.05, 0.05),
+    layers.RandomBrightness(0.2),
 ])
 
-model.compile(optimizer=Adam(), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-model.summary()
+# Normalizar a [-1, 1] fuera del modelo, porque cvzone Classifier ya hace
+# esa normalización al predecir (evita normalizar dos veces).
+norm = lambda x, y: (tf.cast(x, tf.float32) / 127.5 - 1.0, y)
+train_ds = train_ds.map(lambda x, y: norm(augment(x, training=True), y)).prefetch(tf.data.AUTOTUNE)
+val_ds = val_ds.map(norm).prefetch(tf.data.AUTOTUNE)
 
-# ========== 5. Train Model with Class Weights ==========
-early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+# Modelo: MobileNetV2 preentrenado + capa de clasificación
+base = MobileNetV2(input_shape=IMG_SIZE + (3,), include_top=False, weights='imagenet')
+base.trainable = False
 
-history = model.fit(
-    train_generator,
-    validation_data=val_generator,
-    epochs=20,
-    class_weight=class_weights_dict,
-    callbacks=[early_stop]
-)
+inputs = layers.Input(shape=IMG_SIZE + (3,))
+x = base(inputs, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.3)(x)
+outputs = layers.Dense(len(class_names), activation='softmax')(x)
+model = models.Model(inputs, outputs)
 
-# ========== 6. Plot Accuracy and Loss ==========
-plt.plot(history.history['accuracy'], label='Training Accuracy')
-plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-plt.legend()
-plt.title('Model Accuracy')
-plt.xlabel('Epochs')
-plt.ylabel('Accuracy')
-plt.show()
+model.compile(optimizer=tf.keras.optimizers.Adam(1e-3),
+              loss='categorical_crossentropy', metrics=['accuracy'])
+model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS)
 
-plt.plot(history.history['loss'], label='Training Loss')
-plt.plot(history.history['val_loss'], label='Validation Loss')
-plt.legend()
-plt.title('Model Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.show()
+# Ajuste fino de las últimas capas del modelo base
+base.trainable = True
+for layer in base.layers[:-30]:
+    layer.trainable = False
+model.compile(optimizer=tf.keras.optimizers.Adam(1e-5),
+              loss='categorical_crossentropy', metrics=['accuracy'])
+model.fit(train_ds, validation_data=val_ds, epochs=5)
 
-# ========== 7. Save the Model ==========
-model.save('sign_language_model.h5')  # Replace path if you want a different location
-print("Model saved as sign_language_model.h5")
+model.save(os.path.join(MODEL_DIR, 'keras_model.h5'))
+print('Modelo guardado en Model/keras_model.h5')
